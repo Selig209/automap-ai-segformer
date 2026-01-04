@@ -60,6 +60,7 @@ class Predictor(BasePredictor):
     def predict(
         self,
         image: Path = Input(description="Input image to segment"),
+        classes: str = Input(description="Comma-separated list of classes to extract (e.g. 'building,road'). Leave empty for all.", default=""),
         threshold: float = Input(description="Confidence threshold", default=0.65)
     ) -> dict:
         """Run inference and return GeoJSON features"""
@@ -67,7 +68,7 @@ class Predictor(BasePredictor):
         img = Image.open(image).convert("RGB")
         img_np = np.array(img).astype(np.float32)
         
-        # Match training preprocessing
+        # Match training preprocessing (Center crop to 1024x1024)
         h, w, _ = img_np.shape
         if h > 1024 or w > 1024:
             top = (h - 1024) // 2
@@ -86,7 +87,16 @@ class Predictor(BasePredictor):
         CLASS_NAMES = ["background", "building", "road", "static_car", "tree", "vegetation", "human", "moving_car"]
         results = []
         
+        # Parse selected classes
+        selected_classes = [c.strip().lower() for c in classes.split(",") if c.strip()]
+        
         for class_idx in range(1, self.num_classes):
+            class_name = CLASS_NAMES[class_idx]
+            
+            # Skip if user specifically requested other classes
+            if selected_classes and class_name not in selected_classes:
+                continue
+                
             mask = (pred == class_idx).astype(np.uint8)
             
             # Simple polygonization
