@@ -47,7 +47,7 @@ class Predictor(BasePredictor):
         if not os.path.exists(weights_path):
             raise FileNotFoundError("Model weights not found! Check the build process.")
             
-        checkpoint = torch.load(weights_path, map_location=self.device)
+        checkpoint = torch.load(weights_path, map_location=self.device, weights_only=False)
         state_dict = checkpoint['model_state_dict']
         
         # Remove torch.compile prefix if present
