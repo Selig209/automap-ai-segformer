@@ -21,5 +21,8 @@ jobs:
         uses: replicate/setup-cog@v2
         with:
           token: ${{ secrets.REPLICATE_API_TOKEN }}
+      - name: Download Weights (Bake into image)
+        run: |
+          curl -L -o best_model.pth https://automap-ai-uploads-selig.s3.us-east-1.amazonaws.com/weights/segformer-best-model.pth
       - name: Push to Replicate
         run: cog push r8.im/selig/automap-ai-segformer

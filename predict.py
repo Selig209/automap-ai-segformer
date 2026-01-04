@@ -42,14 +42,10 @@ class Predictor(BasePredictor):
         except NameError:
             raise NameError("SegFormerB5 class not found. Please paste the class definition at the top of predict.py")
         
-        # 2. Download weights from S3 if they don't exist locally
+        # 2. Load weights (They are now baked into the image)
         weights_path = "best_model.pth"
-        weights_url = "https://automap-ai-uploads-selig.s3.us-east-1.amazonaws.com/weights/segformer-best-model.pth"
-        
         if not os.path.exists(weights_path):
-            print(f"Downloading weights from {weights_url}...")
-            import urllib.request
-            urllib.request.urlretrieve(weights_url, weights_path)
+            raise FileNotFoundError("Model weights not found! Check the build process.")
             
         checkpoint = torch.load(weights_path, map_location=self.device)
         state_dict = checkpoint['model_state_dict']
