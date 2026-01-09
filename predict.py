@@ -63,29 +63,64 @@ class Predictor(BasePredictor):
         classes: str = Input(description="Comma-separated list of classes to extract (e.g. 'building,road'). Leave empty for all.", default=""),
         threshold: float = Input(description="Confidence threshold", default=0.65)
     ) -> dict:
-        """Run inference and return GeoJSON features"""
-        # Load image
+        """Run inference with sliding window for full coverage"""
+        # 1. Load and prepare image
         img = Image.open(image).convert("RGB")
         img_np = np.array(img).astype(np.float32)
-        
-        # Match training preprocessing (Center crop to 1024x1024)
         h, w, _ = img_np.shape
-        if h > 1024 or w > 1024:
-            top = (h - 1024) // 2
-            left = (w - 1024) // 2
-            img_crop = img_np[top:top+1024, left:left+1024]
-        else:
-            img_crop = img_np
-            
-        # Normalize and prepare tensor
-        img_tensor = torch.from_numpy(img_crop).permute(2, 0, 1).unsqueeze(0).to(self.device) / 255.0
         
-        with torch.no_grad():
-            output = self.model(img_tensor)
-            pred = output.argmax(dim=1).squeeze().cpu().numpy()
+        # Hyperparameters for tiling
+        tile_size = 1024
+        stride = 768  # 256px overlap
+        
+        # 2. Setup output buffers (on CPU to save GPU memory for large images)
+        # We accumulate probabilities (softmax) for better blending in overlaps
+        full_probs = np.zeros((self.num_classes, h, w), dtype=np.float32)
+        count_map = np.zeros((h, w), dtype=np.float32)
+        
+        # 3. Sliding Window Inference
+        print(f"  Processing image {w}x{h} with sliding window...")
+        
+        # Add padding to ensure we cover the edges
+        pad_h = (tile_size - (h - tile_size) % stride) % stride if h > tile_size else (tile_size - h)
+        pad_w = (tile_size - (w - tile_size) % stride) % stride if w > tile_size else (tile_size - w)
+        
+        img_padded = np.pad(img_np, ((0, pad_h), (0, pad_w), (0, 0)), mode='reflect')
+        hp, wp, _ = img_padded.shape
+        
+        for y in range(0, hp - tile_size + 1, stride):
+            for x in range(0, wp - tile_size + 1, stride):
+                # Extract tile
+                tile = img_padded[y:y+tile_size, x:x+tile_size]
+                
+                # Normalize and prepare tensor
+                tile_tensor = torch.from_numpy(tile).permute(2, 0, 1).unsqueeze(0).to(self.device).float() / 255.0
+                
+                with torch.no_grad():
+                    logits = self.model(tile_tensor)
+                    probs = torch.softmax(logits, dim=1).squeeze().cpu().numpy()
+                
+                # Add to full buffers (crop if it extends beyond original image h/w)
+                # But here we just iterate within padded space and then crop the final
+                y_end = min(y + tile_size, h)
+                x_end = min(x + tile_size, w)
+                
+                # Calculate how much of this tile is useful (within original image)
+                tile_h = y_end - y
+                tile_w = x_end - x
+                
+                if tile_h > 0 and tile_w > 0:
+                    full_probs[:, y:y_end, x:x_end] += probs[:, :tile_h, :tile_w]
+                    count_map[y:y_end, x:x_end] += 1.0
 
+        # 4. Final blending and argmax
+        # Ignore areas where count_map is 0 (shouldn't happen with our padding)
+        count_map = np.maximum(count_map, 1.0)
+        full_probs /= count_map
+        pred = full_probs.argmax(axis=0)
+
+        # 5. Post-processing: Generate results and mask
         CLASS_NAMES = ["background", "building", "road", "static_car", "tree", "vegetation", "human", "moving_car"]
-        # UAVid-ish Palette
         PALETTE = [
             (0, 0, 0),       # Background
             (128, 0, 0),     # Building (Red-ish)
@@ -97,9 +132,7 @@ class Predictor(BasePredictor):
             (0, 0, 128),     # Moving Car (Blue)
         ]
 
-        # Higher performance: Create a numpy array for the whole mask at once
-        mask_rgba = np.zeros((1024, 1024, 4), dtype=np.uint8)
-        
+        mask_rgba = np.zeros((h, w, 4), dtype=np.uint8)
         results = []
         selected_classes = [c.strip().lower() for c in classes.split(",") if c.strip()]
         
@@ -111,17 +144,14 @@ class Predictor(BasePredictor):
             
             # Add to colored mask if not background
             if class_idx > 0:
-                mask_rgba[pred == class_idx] = list(color) + [160] # Semi-transparent
+                mask_rgba[pred == class_idx] = list(color) + [160]
 
-            # Skip vectorization for background
-            if class_idx == 0:
-                continue
-
-            # Skip vectorization if user specifically requested other classes
-            if selected_classes and class_name not in selected_classes:
-                continue
+            # Vectorization skip logic
+            if class_idx == 0: continue
+            if selected_classes and class_name not in selected_classes: continue
                 
             # Vectorize
+            # Set a minimum area to filter small noise if needed
             shapes = features.shapes(mask, mask=mask, connectivity=4)
             geojson_features = []
             count = 0
