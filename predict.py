@@ -114,9 +114,11 @@ class Predictor(BasePredictor):
                     count_map[y:y_end, x:x_end] += 1.0
 
         # 4. Final blending and argmax
-        # Ignore areas where count_map is 0 (shouldn't happen with our padding)
         count_map = np.maximum(count_map, 1.0)
         full_probs /= count_map
+        
+        # Get max probability and corresponding class
+        confidences = full_probs.max(axis=0)
         pred = full_probs.argmax(axis=0)
 
         # 5. Post-processing: Generate results and mask
@@ -140,18 +142,27 @@ class Predictor(BasePredictor):
             class_name = CLASS_NAMES[class_idx]
             color = PALETTE[class_idx]
             
-            mask = (pred == class_idx).astype(np.uint8)
+            # Pixels for this class must also meet the confidence threshold
+            is_class = (pred == class_idx)
+            is_confident = (confidences >= threshold)
+            mask = (is_class & is_confident).astype(np.uint8)
             
-            # Add to colored mask if not background
-            if class_idx > 0:
-                mask_rgba[pred == class_idx] = list(color) + [160]
+            # Skip if no pixels found
+            if not np.any(mask):
+                continue
 
-            # Vectorization skip logic
+            # Update colored mask ONLY for selected classes (if any are specified)
+            # or for all classes if none specified
+            should_include = not selected_classes or class_name in selected_classes
+            
+            if class_idx > 0 and should_include:
+                mask_rgba[mask == 1] = list(color) + [160]
+
+            # Vectorization logic: Skip background and unselected classes
             if class_idx == 0: continue
-            if selected_classes and class_name not in selected_classes: continue
+            if not should_include: continue
                 
             # Vectorize
-            # Set a minimum area to filter small noise if needed
             shapes = features.shapes(mask, mask=mask, connectivity=4)
             geojson_features = []
             count = 0
@@ -161,7 +172,7 @@ class Predictor(BasePredictor):
                     geojson_features.append({
                         "type": "Feature",
                         "geometry": geom,
-                        "properties": {"class": CLASS_NAMES[class_idx]}
+                        "properties": {"class": CLASS_NAMES[class_idx], "confidence": float(np.mean(confidences[mask==1]))}
                     })
                     count += 1
             
