@@ -85,21 +85,43 @@ class Predictor(BasePredictor):
             pred = output.argmax(dim=1).squeeze().cpu().numpy()
 
         CLASS_NAMES = ["background", "building", "road", "static_car", "tree", "vegetation", "human", "moving_car"]
-        results = []
+        # UAVid-ish Palette
+        PALETTE = [
+            (0, 0, 0),       # Background
+            (128, 0, 0),     # Building (Red-ish)
+            (128, 64, 128),  # Road (Purple)
+            (192, 0, 192),   # Static Car (Magenta)
+            (0, 128, 0),     # Tree (Green)
+            (128, 128, 0),   # Vegetation (Olive)
+            (64, 64, 0),     # Human (Dark Yellow)
+            (0, 0, 128),     # Moving Car (Blue)
+        ]
+
+        # Higher performance: Create a numpy array for the whole mask at once
+        mask_rgba = np.zeros((1024, 1024, 4), dtype=np.uint8)
         
-        # Parse selected classes
+        results = []
         selected_classes = [c.strip().lower() for c in classes.split(",") if c.strip()]
         
-        for class_idx in range(1, self.num_classes):
+        for class_idx in range(0, self.num_classes):
             class_name = CLASS_NAMES[class_idx]
+            color = PALETTE[class_idx]
             
-            # Skip if user specifically requested other classes
+            mask = (pred == class_idx).astype(np.uint8)
+            
+            # Add to colored mask if not background
+            if class_idx > 0:
+                mask_rgba[pred == class_idx] = list(color) + [160] # Semi-transparent
+
+            # Skip vectorization for background
+            if class_idx == 0:
+                continue
+
+            # Skip vectorization if user specifically requested other classes
             if selected_classes and class_name not in selected_classes:
                 continue
                 
-            mask = (pred == class_idx).astype(np.uint8)
-            
-            # Simple polygonization
+            # Vectorize
             shapes = features.shapes(mask, mask=mask, connectivity=4)
             geojson_features = []
             count = 0
@@ -117,11 +139,18 @@ class Predictor(BasePredictor):
                 results.append({
                     "class": CLASS_NAMES[class_idx],
                     "count": count,
-                    "geojson_url": None, # This will be handled by Replicate output or our post-processing if needed
                     "features": {
                         "type": "FeatureCollection",
                         "features": geojson_features
                     }
                 })
 
-        return {"results": results}
+        # Save mask
+        mask_path = "/tmp/mask.png"
+        mask_img = Image.fromarray(mask_rgba, "RGBA")
+        mask_img.save(mask_path)
+
+        return {
+            "results": results,
+            "mask": Path(mask_path)
+        }
