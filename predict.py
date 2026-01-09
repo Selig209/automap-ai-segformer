@@ -152,7 +152,6 @@ class Predictor(BasePredictor):
                 continue
 
             # Update colored mask ONLY for selected classes (if any are specified)
-            # or for all classes if none specified
             should_include = not selected_classes or class_name in selected_classes
             
             if class_idx > 0 and should_include:
@@ -161,6 +160,12 @@ class Predictor(BasePredictor):
             # Vectorization logic: Skip background and unselected classes
             if class_idx == 0: continue
             if not should_include: continue
+            
+            # Save individual class mask
+            class_mask_rgba = np.zeros((h, w, 4), dtype=np.uint8)
+            class_mask_rgba[mask == 1] = list(color) + [200]
+            class_mask_path = f"/tmp/mask_{class_name}.png"
+            Image.fromarray(class_mask_rgba, "RGBA").save(class_mask_path)
                 
             # Vectorize
             shapes = features.shapes(mask, mask=mask, connectivity=4)
@@ -183,10 +188,11 @@ class Predictor(BasePredictor):
                     "features": {
                         "type": "FeatureCollection",
                         "features": geojson_features
-                    }
+                    },
+                    "png_url": Path(class_mask_path)  # Replicate will upload this
                 })
 
-        # Save mask
+        # Save combined mask
         mask_path = "/tmp/mask.png"
         mask_img = Image.fromarray(mask_rgba, "RGBA")
         mask_img.save(mask_path)
