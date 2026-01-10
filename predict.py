@@ -79,14 +79,34 @@ class Predictor(BasePredictor):
         count_map = np.zeros((h, w), dtype=np.float32)
         
         # 3. Sliding Window Inference
-        print(f"  Processing image {w}x{h} with sliding window...")
+        print(f"  Processing image {w}x{h} with sliding window (tile={tile_size}, stride={stride})...")
         
-        # Add padding to ensure we cover the edges
-        pad_h = (tile_size - (h - tile_size) % stride) % stride if h > tile_size else (tile_size - h)
-        pad_w = (tile_size - (w - tile_size) % stride) % stride if w > tile_size else (tile_size - w)
+        # Calculate padding to ensure complete coverage
+        # We need enough padding so that the last tile covers the bottom-right corner
+        # For a tile at position y, it covers y to y+tile_size
+        # The loop goes: 0, stride, 2*stride, ... up to (last_y such that last_y + tile_size <= hp)
+        # We need: last_y + tile_size >= h, where last_y = n * stride for some n
+        # So we need: n*stride + tile_size >= h, meaning n >= (h - tile_size) / stride
+        # To ensure coverage: hp should be at least h if h <= tile_size, else large enough for loop
+        
+        if h <= tile_size:
+            pad_h = tile_size - h  # Make it exactly tile_size
+        else:
+            # Ensure at least one tile covers the bottom edge
+            num_tiles_h = (h - tile_size + stride - 1) // stride + 1
+            required_h = (num_tiles_h - 1) * stride + tile_size
+            pad_h = max(0, required_h - h)
+        
+        if w <= tile_size:
+            pad_w = tile_size - w
+        else:
+            num_tiles_w = (w - tile_size + stride - 1) // stride + 1
+            required_w = (num_tiles_w - 1) * stride + tile_size
+            pad_w = max(0, required_w - w)
         
         img_padded = np.pad(img_np, ((0, pad_h), (0, pad_w), (0, 0)), mode='reflect')
         hp, wp, _ = img_padded.shape
+        print(f"  Padded to {wp}x{hp}, will process {len(range(0, hp - tile_size + 1, stride)) * len(range(0, wp - tile_size + 1, stride))} tiles")
         
         for y in range(0, hp - tile_size + 1, stride):
             for x in range(0, wp - tile_size + 1, stride):
@@ -100,18 +120,20 @@ class Predictor(BasePredictor):
                     logits = self.model(tile_tensor)
                     probs = torch.softmax(logits, dim=1).squeeze().cpu().numpy()
                 
-                # Add to full buffers (crop if it extends beyond original image h/w)
-                # But here we just iterate within padded space and then crop the final
-                y_end = min(y + tile_size, h)
-                x_end = min(x + tile_size, w)
+                # The tile is valid - add it to full buffers
+                # Calculate the actual region to update (clipped to original image size)
+                y_start_out = y
+                x_start_out = x
+                y_end_out = min(y + tile_size, h)
+                x_end_out = min(x + tile_size, w)
                 
-                # Calculate how much of this tile is useful (within original image)
-                tile_h = y_end - y
-                tile_w = x_end - x
+                # Calculate corresponding region in the tile
+                tile_y_end = y_end_out - y
+                tile_x_end = x_end_out - x
                 
-                if tile_h > 0 and tile_w > 0:
-                    full_probs[:, y:y_end, x:x_end] += probs[:, :tile_h, :tile_w]
-                    count_map[y:y_end, x:x_end] += 1.0
+                if y_start_out < h and x_start_out < w:
+                    full_probs[:, y_start_out:y_end_out, x_start_out:x_end_out] += probs[:, :tile_y_end, :tile_x_end]
+                    count_map[y_start_out:y_end_out, x_start_out:x_end_out] += 1.0
 
         # 4. Final blending and argmax
         count_map = np.maximum(count_map, 1.0)
@@ -148,6 +170,24 @@ class Predictor(BasePredictor):
             mask = (is_class & is_confident).astype(np.uint8)
             
             # Skip if no pixels found
+            if not np.any(mask):
+                continue
+
+            # --- POST-PROCESSING CLEANUP ---
+            # Apply morphological operations to reduce noise and fill holes
+            import cv2
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            
+            # MORPH_CLOSE: Fill small holes inside objects
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            
+            # MORPH_OPEN: Remove small noise/artifacts outside objects  
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            
+            # Median blur: Smooth jagged edges
+            mask = cv2.medianBlur(mask, 3)
+            
+            # Re-check if any mask remains after cleanup
             if not np.any(mask):
                 continue
 
